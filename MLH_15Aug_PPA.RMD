@@ -1,0 +1,480 @@
+---
+title: "DAG 4 - reworking - Low S Low R High SP"
+author: "Evelyn Tay"
+date: "`r Sys.Date()`"
+output: 
+  bookdown::word_document2:
+    tables:
+      style: Normal Table
+      caption: 
+        style: Table Caption
+        pre: "Table "
+        sep: ". "       
+#bibliography: Test2.bib
+#csl: C:\\Users\\ETay\\Documents\\SAPs\\NIPSAP\\the-new-england-journal-of-medicine.csl
+
+---
+
+```{r setup, include=FALSE}
+options(mc.cores = parallel::detectCores())
+
+knitr::opts_chunk$set(echo = TRUE)
+library(bookdown)
+library(officedown)
+library(truncnorm)
+library(rstan)
+library(posterior)
+library(dplyr)
+library(printr)
+library(tidyverse)
+library(flextable)
+library(bayesplot)
+library(rstanarm)
+library(ggplot2)
+library(data.table)
+
+```
+
+## Assumptions for the generative model
+
+We denote age as a binary variable, $A_i \in {0,1}$ for participant $i = 1,2,...,N$, where $A_i = 0$ indicates an individual $<$50 years of age and $A_i = 1$ indicates an individual $\geq$50 years of age. Similarly, severity of vaccine reaction is denoted as $S_i \in {0,1}$ for participant $i = 1,2,...,N$, where $S_i = 0$ indicates no or a mild vaccine reaction and $S_i = 1$ indicates a moderate or highly severe vaccine reaction.
+
+Younger people are more likely to react to a vaccine and have an immune response than older people. Moderate to highly severe reactions, i.e. $S_i = 1$ were reported more often by younger vaccine recipients ( 16 to 55 years) than by older ($/gt$55 years) in a phase II-III trial of a COVID19 vaccine. We are assuming the following prevalances of a moderate to highly severe vaccine reaction.
+
+P(A = 1| A = 0) = 0.3
+
+P(S = 1| A = 1) = 0.2
+
+We are assuming whether an individual responds to a survey or not is dependent upon both the age of an individual and the severity of their vaccine reaction. Here, we denote responded to a survey as $R_i \in {0,1}$ for participant $i = 1,2,...,N$, where $R_i = 0$ indicates an individual did not respond to a survey and $R_i = 1$ indicates that they did. People $<$50 years of age have a lower response rate to health surveys than those $/gt$50 years (ref) and this, together with the assumption that those $<$50 years are more likely to have a moderate to highly severe vaccine reaction are incorporated in the following assumptions:
+
+P(R = 1| A = 1, S = 1) = 0.27
+
+P(R = 1| A = 1, S = 0) = 0.15
+
+P(R = 1| A = 0, S = 1) = 0.18
+
+P(R = 1| A = 0, S = 0) = 0.10
+
+We are assuming that younger people are less likely to seek medical attention than older people.[@RN18] Here, seeking medical attention is denoted as $M_i \in {0,1}$ for participant $i = 1,2,...,N$,where $M_i = 0$ indicates an individual did not seek medical attention and $M_i = 1$ indicates that they did. Together with making the assumption that an individual is less likely to seek medical attention if they have no or a mild vaccine reaction, we make the following assumptions about the prevalence of seeking medical attention:
+
+
+P(M = 1| A = 1, S = 1) = 0.15 
+
+P(M = 1| A = 1, S = 0) = 0.05
+
+P(M = 1| A = 0, S = 1) = 0.03
+
+P(M = 1| A = 0, S = 0) = 0.01
+
+The outcome D (disclosed or reported as having sought medical attention) is dependent upon whether an individual responds (R) to a survey and whether they sought medical attention (M) for a reaction to the vaccine. Whether an individual reports that they have sought medical attention is deterministic on whether they responded to a survey or not, however, if they did not seek medical attention there may be probability very close to zero that they reported as having sought medical attention (?).
+
+P(D = 1| R = 1, M = 1) = 0.999
+
+P(D = 1| R = 1, M = 0) = 0.001
+
+P(D = 1| R = 0, M = 0) = 0
+
+## Simulation results from the generative model
+
+The ages of 10,000 individuals were simulated by sampling from a truncated Normal distribution to ensure positive values with a mean age of 43.5 years and sd of 18.6 to ensure an even and plausible spread over the threshold age of 50 years.This was based upon fitting a Normal distribution to age data from participants vaccinated with COVID-19 vaccines.
+
+```{r, echo = FALSE}
+N = 100000 #12 min for 10thou
+Asim <-abs(rtruncnorm(N,mean = 43.5, sd = 18.6))
+
+Asim<-as.integer(Asim)
+dummy <- function(Asim) {if (Asim < 50) {A<-0} else {A<-1}}
+
+hist(Asim)
+print(summary(Asim))
+
+A <- lapply(Asim, dummy)
+A <- unlist(A)
+
+
+reaction <- function(A) {if (A > 0) {S <- rbinom(1,1,0.3)} else {S <- rbinom(1, 1,0.45)}}
+
+S <- lapply(A, reaction)
+S <- unlist(S)
+dat <- data.frame(A,S)
+
+response <- function(dat) 
+  {A = dat[1]
+  S = dat[2]
+  if( A > 0 & S > 0) {R <- rbinom(1, 1, 0.27)}
+  else if( A > 0 & S < 1 )  {R <- rbinom(1, 1,0.15)} 
+  else if( A < 1 & S > 0 ) {R <- rbinom(1,1, 0.18)}
+  else  {R <- rbinom(1,1, 0.10)} 
+  return(R)
+  }
+
+R <- apply(dat, 1 ,response)
+R <- unlist(R)
+dat$R <- R
+
+###Simulating SMA
+
+seek <- function(dat) 
+{A = dat[1]
+S = dat[2]
+if( A > 0 & S > 0) {M <- rbinom(1,1,0.15)} 
+else if( A > 0 & S < 1 )  {M <- rbinom(1,1,0.05)} 
+else if( A < 1 & S > 0 ) {M <- rbinom(1,1,0.03)}
+else  {M <- rbinom(1,1, 0.01)} 
+return(M)
+}
+
+M <- apply(dat, 1 ,seek)
+M <- unlist(M)
+dat$M <- M
+
+reportMA <- function(dat)
+{R = dat[3]
+ M = dat[4]
+if (R > 0 & M > 0 ) {D <- rbinom(1,1,0.999)}
+else if( R > 0 & M < 1 )  {D <- rbinom(1,1,0.001)} 
+else  {D <- 0} 
+return(D)
+}
+
+D <- apply(dat, 1, reportMA)
+D <- unlist(D)
+dat$D <- D
+#####################################################
+
+mean(dat[dat$A == 0,]$S) #P(S = 1|A = 0)
+
+mean(dat[dat$A == 1,]$S) #P(S = 1|A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$R) #P(R = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$R) #P(R = 1|S = 1 A = 1)
+
+mean(dat[dat$A == 0 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 0)
+
+mean(dat[dat$A == 0 & dat$S == 1,]$M) #P(M = 1|S = 1 A = 0)
+
+mean(dat[dat$A == 1 & dat$S == 0,]$M) #P(M = 1|S = 0 A = 1)
+
+mean(dat[dat$A == 1 & dat$S == 1,]$M) #P(M = 1|A = 1,S = 1)
+
+mean(dat[dat$R == 1 & dat$M == 1,]$D) #P(D = 1|R = 1,M = 1)
+
+dat_R <- dat %>% filter(R == 1)
+
+
+##Totals of variables
+#
+mean(dat$A == 1)
+
+mean(dat$S == 1)
+
+mean(dat_R$S == 1)
+
+mean(dat$R == 1)
+
+mean(dat$M == 1)
+
+mean(dat$D == 1)
+
+mean(dat_R$D == 1)
+
+
+
+```
+Histogram and summary of simulated ages (A sim).
+
+
+```{r, echo = FALSE}
+#Week 1 - LLL
+
+N2 = 10000
+Asim2 <-abs(rtruncnorm(N2,mean = 43.5, sd = 18.6))
+
+Asim2 <-as.integer(Asim2)
+dummy2 <- function(Asim2) {if (Asim2 < 50) {A2 <-0} else {A2 <-1}}
+
+hist(Asim2)
+print(summary(Asim2))
+
+A2 <- lapply(Asim2, dummy2)
+A2 <- unlist(A2)
+
+##Severity of reaction
+
+reaction2 <- function(A2) {if (A2 > 0) {S2 <- rbinom(1, 1,0.2)} else {S2 <- rbinom(1, 1,0.3)}}
+
+S2 <- lapply(A2, reaction2)
+S2 <- unlist(S2)
+dat2 <- data.frame(A2,S2)
+
+
+
+response2 <- function(dat2) 
+{A2 = dat2[1]
+S2 = dat2[2]
+if( A2 > 0 & S2 > 0) {R2 <- rbinom(1, 1,0.23)}
+
+else if( A2 > 0 & S2 < 1 )  {R2 <- rbinom(1, 1,0.15)} 
+
+else if( A2 < 1 & S2 > 0 ) {R2 <- rbinom(1, 1,0.15)}
+
+else  {R2 <- rbinom(1,1, 0.10)} 
+
+return(R2)
+
+}
+
+R2 <- apply(dat2, 1 ,response2)
+R2 <- unlist(R2)
+dat2$R2 <- R2
+
+##Seek medical attention for an AE
+
+seek2 <- function(dat2) 
+{A2 = dat2[1]
+S2 = dat2[2]
+if( A2 > 0 & S2 > 0) {M2 <- rbinom(1,1,0.15)} 
+
+else if( A2 > 0 & S2 < 1 )  {M2 <- rbinom(1, 1,0.05)} 
+
+else if( A2 < 1 & S2 > 0 ) {M2 <- rbinom(1, 1, 0.03)}
+
+else  {M2 <- rbinom(1, 1, 0.01)} #(A < 1 & S < 1) 
+
+return(M2)
+
+}
+
+M2 <- apply(dat2, 1 ,seek2)
+M2 <- unlist(M2)
+dat2$M2 <- M2
+
+##Reporting that they sought MA for an AE
+
+reportMA2 <- function(dat2)
+{A2 = dat2[1]
+S2 = dat2[2]
+R2 = dat2[3]
+M2 = dat2[4]
+if (R2 > 0 & M2 > 0 ) {D2 <- rbinom(1,1,0.999)}# R = 1, M = 1
+
+else if( R2 > 0 & M2 < 1 )  {D2 <- rbinom(1,1,0.001)} #R = 1, M = 0
+
+else  {D2 <- 0} #R = 0, M = 0
+
+return(D2)
+}
+
+D2 <- apply(dat2, 1, reportMA2)
+D2 <- unlist(D2)
+dat2$D2 <- D2
+
+```
+Individual response to a survey and probability of an individual seeking medical attention were modeled as binary outcomes and sampled from Bernoulli distributions conditional on the age category and severity of reaction of an individual. Whether an individual responded as having sought medical attention for a reaction was also modeled as a binary outcome from a Bernoulli distribution dependent upon whether an individual responded to a survey and also sought medical attention
+
+Table of probabilities derived from the simulated data.
+
+
+## Bayesian logistic regression models
+
+Model 1: For effect of age and degree of reaction on response and also on seeking medical attention. For effect of response and seeking medical attention on responding that an individual sought medical attention for a reaction to a vaccine
+
+
+
+```{stan, output.var = "mod1", include = FALSE}
+
+data{
+  
+  int N;
+  int N_A;
+  int N_S;
+  int N_R;
+  int N_M;
+  int N_D;
+  array[N] int A;
+  array[N] int S;
+  array[N] int R;
+  array[N] int M;
+  array[N] int D;
+  }
+  
+parameters{
+  array[N_A, N_S] real alpha;
+  array[N_A] real beta;
+  array[N_A, N_S] real gamma;
+  array[N_M] real delta;
+}
+
+transformed parameters{
+  vector[N] p;
+  vector[N] q;
+  vector[N] g;
+  vector[N] h;
+  
+  vector[N_A*N_S] alpha_vec;
+  vector[N_A] beta_vec;
+  vector[N_A*N_S] gamma_vec;
+  
+  for(i in 1:N){
+    p[i] = inv_logit(alpha[A[i] + 1][S[i] + 1]);
+    q[i] = inv_logit(beta[A[i] + 1]);
+    g[i] = inv_logit(gamma[A[i] + 1][S[i] + 1]);
+    h[i] = R[i]*inv_logit(delta[M[i] + 1]);
+  }
+  
+  alpha_vec = to_vector(to_array_1d(alpha));
+  beta_vec = to_vector(to_array_1d(beta));
+  gamma_vec = to_vector(to_array_1d(gamma));
+}
+model{
+  
+  //priors
+  alpha_vec ~ normal(0, 2);
+  
+  //likelihood
+  R ~ bernoulli( p );
+  
+  //priors
+  beta_vec ~ normal( 0, 2);
+  
+  //likelihood
+  S ~ bernoulli(q);
+  
+  //priors
+  gamma_vec ~ normal(-4.59,2);
+  
+  //likelihood
+  M ~ bernoulli( g );
+  
+  //priors
+ 
+  delta[1] ~ normal(-5, 1);
+  delta[2] ~ normal(5, 1);
+  
+  //likelihood
+  D ~ bernoulli(h);
+  
+}
+
+
+```
+
+## Validating the model
+
+### No stratification
+
+```{r, echo = FALSE}
+dat_mod <- list(S = S, R = R, A = A, N = N, M = M, D = D, N_A = 2, N_S = 2, N_R = 2, N_M = 2, N_D = 2)
+
+mod <- rstan::sampling(mod1, data = dat_mod,iter = 2000, warmup = 1000, chains = 4, refresh = FALSE, show_messages = FALSE)
+
+params <- summary(mod, pars = c("beta[1]", "beta[2]", "alpha[1,1]", "alpha[1,2]", "alpha[2,1]", "alpha[2,2]", 
+                                "gamma[1,1]","gamma[1,2]","gamma[2,1]","gamma[2,2]",
+                                "delta[1]","delta[2]"))
+print(params)
+
+pars <- rstan::extract(mod, pars = c("beta[1]", "beta[2]", "alpha[1,1]", "alpha[1,2]", "alpha[2,1]", "alpha[2,2]",  
+                                     "gamma[1,1]","gamma[1,2]","gamma[2,1]","gamma[2,2]",
+                                     "delta[1]","delta[2]"))
+
+
+pars_inv_logit <- lapply(pars, plogis)
+probs <- sapply(pars_inv_logit, mean)
+sds <- sapply(pars_inv_logit, sd)
+
+print(probs)
+print(sds)
+
+```
+
+
+```{stan, output.var = "PPA", include = FALSE}
+
+data {
+  int<lower=1> G;      // number of groups which is two age groups
+  int<lower=0> x[G];      // array  Age variables - either 0 or 1
+  int<lower=1> n[G];      // array of records per subgroup within one Vaccine 
+  
+  int<lower=0> y[G];      // array of adverse events in each subgroup within one vaccine 
+}
+
+parameters {
+  real alpha;        // intercept term
+  real beta[G];       // log odds ratio
+  
+}
+
+transformed parameters {
+  real p[G];          // probabilities for one vaccine
+  for (g in 1:G)  p[g] = inv_logit(alpha + x[g]*beta[g]);
+  
+}
+
+model {
+  
+  alpha ~ normal(-4, 2); //???
+    beta ~ normal(0, 1); // prior distribution
+  
+  for (g in 1:G) y[g] ~ binomial_logit(n, alpha + x[g]*beta[g]);  // binomial sampling model
+  
+}
+
+```
+
+
+```{r, echo = FALSE}
+G = 2
+dat_R <- dat[dat$R == 1,]
+dat2_R <- dat2[dat2$R2 == 1,]
+x <- c(0,1)
+n <- c(sum(dat2_R$A2 == 0), sum(dat2_R$A2 == 1))
+y <- c(sum(dat2_R[dat2_R$A2 == 0,]$D2 == 1), sum(dat2_R[dat2_R$A2 == 1,]$D2 == 1))
+
+
+old_data <- list(G = G, y = y, n = n, x = x)
+
+mod <- rstan::sampling(PPA, data = old_data,iter = 2000, warmup = 1000, chains = 4, refresh = FALSE, show_messages = FALSE)
+
+
+postr <- as.matrix(mod, c("p")) 
+betas <- as.matrix(mod, c("beta"))
+n_new = c(sum(dat_R$A == 0), sum(dat_R$A == 1)) #Week 2 data - how much would we anticipate this week
+
+y_tilde <- matrix(nrow = nrow(postr), ncol = 2)
+y_tilde[,1] <- rbinom(nrow(postr), n_new[1], 1.2*postr[,1])
+y_tilde[,2] <- rbinom(nrow(postr), n_new[2], 1.2*postr[,2])
+
+
+pred <- matrixStats::colQuantiles(y_tilde, probs = 0.99)
+
+
+obs1week1 <- sum(dat2_R[dat2_R$A2 == 0,]$D2 == 1)
+obs1 <- sum(dat_R[dat_R$A == 0,]$D == 1)
+
+obs2 <- sum(dat_R[dat_R$A == 1,]$D == 1)
+obs2week1 <- sum(dat2_R[dat2_R$A2 == 1,]$D2 == 1)
+
+d1 <- density(y_tilde[,1], lty = 3)
+plot(d1, main = "Age group <50 years", xlab = "No. of individuals", xlim = c(0,200))
+abline(v = pred[1], col = "red", lty = 3, lwd = 2)
+abline(v = obs1week1, col = "blue", lty = 3, lwd = 2)
+abline(v = obs1, col = "blue", lwd = 2)
+legend("topright", legend = c("Signal Threshold", "No. of reported MAs Week 1","No. of reported MAs Week 2"), col = c("red","blue","blue"), lty = c(3,3,1), lwd = 2)
+
+
+d2 <- density(y_tilde[,2])
+plot(d2, main = "Age group >= 50 years", xlab = "No. of individuals", xlim = c(0,200))
+abline(v = pred[2], col = "red", lty = 3, lwd = 2)
+abline(v = obs2week1, col = "blue", lty = 3, lwd = 2)
+abline(v = obs2, col = "blue", lwd = 2)
+legend("topright", legend = c("Signal Threshold", "No. of reported MAs Week 1","No. of reported MAs Week 2"), col = c("red","blue","blue"), lty = c(3,3,1), lwd = 2)
+
+
+```
+
+
